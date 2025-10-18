@@ -1,0 +1,5 @@
+{
+  "name": "Chat App",
+  "description": "A multi-room chat application where users can join different topic-based rooms.",
+  "requestFramePermissions": []
+}
