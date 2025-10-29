@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
@@ -552,7 +553,7 @@ const IncomingCallModal = ({ caller, onAccept, onDecline }) => (
     </div>
 );
 
-const CallView = ({ onEndCall, localStream, remoteStream, isMuted, isCameraOff, toggleMute, toggleCamera }) => {
+const CallView = ({ onEndCall, localStream, remoteStream, isMuted, isCameraOff, toggleMute, toggleCamera, isScreenSharing, toggleScreenShare }) => {
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const remoteVideoRef = useRef<HTMLVideoElement>(null);
 
@@ -578,6 +579,9 @@ const CallView = ({ onEndCall, localStream, remoteStream, isMuted, isCameraOff, 
                 </button>
                 <button onClick={toggleCamera} className={`call-control-button ${isCameraOff ? 'active' : ''}`}>
                     {isCameraOff ? 'Ligar Câmera' : 'Desligar Câmera'}
+                </button>
+                <button onClick={toggleScreenShare} className={`call-control-button ${isScreenSharing ? 'active' : ''}`}>
+                    {isScreenSharing ? 'Parar Apresentação' : 'Apresentar Tela'}
                 </button>
                 <button onClick={onEndCall} className="call-control-button end-call">
                     Encerrar
@@ -626,9 +630,12 @@ const Chat = ({ user }) => {
   const [incomingCall, setIncomingCall] = useState(null);
   const [callPartnerUid, setCallPartnerUid] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [localDisplayStream, setLocalDisplayStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [callDuration, setCallDuration] = useState(0);
 
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const messageListRef = useRef(null);
@@ -636,6 +643,7 @@ const Chat = ({ user }) => {
   const mentionQueryRef = useRef('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const callSignalingRef = useRef(null);
+  const callTimerRef = useRef(null);
   
   // One-time setup for public rooms
   useEffect(() => {
@@ -905,14 +913,84 @@ const Chat = ({ user }) => {
 
         return () => query.off('value', listener);
     }, [userSearchQuery, user.uid]);
+    
+    // Call Duration Timer
+    useEffect(() => {
+        if (callState === 'connected') {
+            callTimerRef.current = setInterval(() => {
+                setCallDuration(prev => prev + 1);
+            }, 1000);
+        } else {
+            clearInterval(callTimerRef.current);
+            setCallDuration(0);
+        }
+        return () => clearInterval(callTimerRef.current);
+    }, [callState]);
+
+    const formatDuration = (seconds) => {
+        const mins = Math.floor(seconds / 60).toString().padStart(2, '0');
+        const secs = (seconds % 60).toString().padStart(2, '0');
+        return `${mins}:${secs}`;
+    };
+  
+  const handleStopScreenShare = () => {
+        if (!peerConnectionRef.current || !localStream) {
+            return;
+        }
+        if (isScreenSharing && localDisplayStream) {
+            localDisplayStream.getTracks().forEach(track => track.stop());
+        }
+        setLocalDisplayStream(localStream);
+        const cameraTrack = localStream.getVideoTracks()[0];
+        const sender = peerConnectionRef.current.getSenders().find(s => s.track?.kind === 'video');
+        if (sender && cameraTrack) {
+            sender.replaceTrack(cameraTrack).catch(err => {
+                console.error("Error replacing track back to camera:", err);
+            });
+        }
+        setIsScreenSharing(false);
+  };
+  
+  const toggleScreenShare = async () => {
+        if (isScreenSharing) {
+            handleStopScreenShare();
+        } else {
+            if (!peerConnectionRef.current) return;
+            try {
+                const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+                const screenTrack = screenStream.getVideoTracks()[0];
+                const sender = peerConnectionRef.current.getSenders().find(s => s.track?.kind === 'video');
+
+                if (sender) {
+                    await sender.replaceTrack(screenTrack);
+                    setLocalDisplayStream(screenStream);
+                    setIsScreenSharing(true);
+                }
+
+                screenTrack.onended = () => {
+                    handleStopScreenShare();
+                };
+            } catch (err) {
+                console.error("Error starting screen share:", err);
+                setLocalDisplayStream(localStream);
+            }
+        }
+  };
 
   const cleanupCall = () => {
+      if (isScreenSharing) {
+        if (localDisplayStream) {
+            localDisplayStream.getTracks().forEach(track => track.stop());
+        }
+        setIsScreenSharing(false);
+      }
       localStream?.getTracks().forEach(track => track.stop());
       if (peerConnectionRef.current) {
         peerConnectionRef.current.close();
         peerConnectionRef.current = null;
       }
       setLocalStream(null);
+      setLocalDisplayStream(null);
       setRemoteStream(null);
       setCallState('idle');
       setIncomingCall(null);
@@ -946,6 +1024,7 @@ const Chat = ({ user }) => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         setLocalStream(stream);
+        setLocalDisplayStream(stream);
 
         const callId = `call_${user.uid}_${partnerUid}`;
         callSignalingRef.current = callId;
@@ -977,6 +1056,7 @@ const Chat = ({ user }) => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         setLocalStream(stream);
+        setLocalDisplayStream(stream);
 
         callSignalingRef.current = incomingCall.callId;
         peerConnectionRef.current = createPeerConnection(incomingCall.callId, stream);
@@ -1372,6 +1452,7 @@ const Chat = ({ user }) => {
   const isPrivateChat = activeRoomId && activeRoomId.startsWith('private_');
   const allRooms = [...joinedPublicRooms, ...privateRooms];
   const activeRoom = !isPrivateChat ? allRooms.find(r => r.id === activeRoomId) : null;
+  const isGroupRoom = activeRoomId && !activeRoomId.startsWith('private_');
   
   let chatPartner = null;
   if(isPrivateChat) {
@@ -1439,7 +1520,10 @@ const Chat = ({ user }) => {
           <ul className="room-list">
             {joinedPublicRooms.map(room => (
               <li key={room.id} className={`room-item joined ${room.id === activeRoomId ? 'active' : ''}`} onClick={() => handleRoomSelect(room.id)}>
-                <span className="room-name"># {room.name}</span>
+                <span className="room-name-wrapper">
+                    <svg className="public-room-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 1h1v14h-1V1zm4 0h1v14h-1V1zM1 5.5h14v1H1v-1zm0 4h14v1H1v-1z"/></svg>
+                    <span className="room-name">{room.name}</span>
+                </span>
                  <button 
                     className="leave-private-chat-button" 
                     title={`Sair da sala ${room.name}`} 
@@ -1456,7 +1540,7 @@ const Chat = ({ user }) => {
                   <li key={room.id} className={`room-item joined ${room.id === activeRoomId ? 'active' : ''}`} onClick={() => handleRoomSelect(room.id)}>
                     <span className="room-name-wrapper">
                         <svg className="private-room-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/></svg>
-                        {room.name}
+                        <span className="room-name">{room.name}</span>
                     </span>
                     <button 
                         className="leave-private-chat-button" 
@@ -1470,7 +1554,6 @@ const Chat = ({ user }) => {
           </ul>
           <h3 className="sidebar-subheader">Mensagens Diretas</h3>
           <ul className="room-list">
-{/* FIX: The file was truncated here, causing a syntax error. Completed the code to properly render the list of private chats. */}
               {privateChats.map(chat => {
                   const partnerStatus = partnerStatuses[chat.uid] || { state: 'offline', status: 'offline' };
                   const isOnline = partnerStatus.state === 'online';
@@ -1520,14 +1603,55 @@ const Chat = ({ user }) => {
                     ) : activeRoom ? (
                         <>
                             <h2>{activeRoom.name}</h2>
-                            <p className="online-users-count">{onlineUsers.length} online</p>
                         </>
                     ) : null}
                 </div>
+                {isPrivateChat && callState !== 'idle' && (
+                    <div className={`call-status-indicator ${callState}`}>
+                        {callState === 'calling' && (
+                            <>
+                                <svg className="call-status-icon pulsing-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M3.654 1.328a.678.678 0 0 0-1.015-.063L1.605 2.3c-.483.484-.661 1.169-.45 1.77a17.568 17.568 0 0 0 4.168 6.608 17.569 17.569 0 0 0 6.608 4.168c.601.211 1.286.033 1.77-.45l1.034-1.034a.678.678 0 0 0-.063-1.015l-2.307-1.794a.678.678 0 0 0-.58-.122l-2.19.547a1.745 1.745 0 0 1-1.657-.459L5.482 8.062a1.745 1.745 0 0 1-.46-1.657l.548-2.19a.678.678 0 0 0-.122-.58L3.654 1.328zM1.884.511a1.745 1.745 0 0 1 2.612.163L6.29 2.98c.329.423.445.974.28 1.494l-.547 2.19a.678.678 0 0 0 .178.643l2.457 2.457a.678.678 0 0 0 .644.178l2.189-.547a1.745 1.745 0 0 1 1.494.28l2.306 1.794c.829.645.905 1.87.163 2.611l-1.034 1.034c-.74.74-1.846 1.065-2.877.702a18.634 18.634 0 0 1-7.01-4.42 18.634 18.634 0 0 1-4.42-7.009c-.362-1.03-.037-2.137.703-2.877L1.885.511z"/></svg>
+                                <span>Chamando...</span>
+                            </>
+                        )}
+                        {callState === 'ringing' && (
+                            <>
+                                <svg className="call-status-icon ringing-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M3.654 1.328a.678.678 0 0 0-1.015-.063L1.605 2.3c-.483.484-.661 1.169-.45 1.77a17.568 17.568 0 0 0 4.168 6.608 17.569 17.569 0 0 0 6.608 4.168c.601.211 1.286.033 1.77-.45l1.034-1.034a.678.678 0 0 0-.063-1.015l-2.307-1.794a.678.678 0 0 0-.58-.122l-2.19.547a1.745 1.745 0 0 1-1.657-.459L5.482 8.062a1.745 1.745 0 0 1-.46-1.657l.548-2.19a.678.678 0 0 0-.122-.58L3.654 1.328zM1.884.511a1.745 1.745 0 0 1 2.612.163L6.29 2.98c.329.423.445.974.28 1.494l-.547 2.19a.678.678 0 0 0 .178.643l2.457 2.457a.678.678 0 0 0 .644.178l2.189-.547a1.745 1.745 0 0 1 1.494.28l2.306 1.794c.829.645.905 1.87.163 2.611l-1.034 1.034c-.74.74-1.846 1.065-2.877.702a18.634 18.634 0 0 1-7.01-4.42 18.634 18.634 0 0 1-4.42-7.009c-.362-1.03-.037-2.137.703-2.877L1.885.511z"/></svg>
+                                <span>Chamada recebida...</span>
+                            </>
+                        )}
+                        {callState === 'connected' && (
+                            <>
+                                <svg className="call-status-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M0 5a2 2 0 0 1 2-2h7.5a2 2 0 0 1 1.983 1.738L14.33 5H14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-.33l1.823 2.43a.5.5 0 0 1-.364.801L15 12V9.5l.33-.44a1 1 0 0 1 1-1V5a1 1 0 0 1-1-1h-.5a2 2 0 0 1-2-2H2a2 2 0 0 1-2 2v6a2 2 0 0 1 2 2h7.5a2 2 0 0 1 1.983-1.738L13.67 11H14a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h.33l-1.823-2.43a.5.5 0 0 1 .364-.801L11 5V2.5l-.33.44a1 1 0 0 1-1 .56V5H2a1 1 0 0 1-1-1V5z"/></svg>
+                                <span>Em chamada de vídeo - {formatDuration(callDuration)}</span>
+                            </>
+                        )}
+                    </div>
+                )}
                 <div className="chat-header-actions">
                     {isPrivateChat && callState === 'idle' && (
                         <button onClick={handleStartCall} className="video-call-button" title="Iniciar chamada de vídeo">
                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M0 5a2 2 0 0 1 2-2h7.5a2 2 0 0 1 1.983 1.738L14.33 5H14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-.33l1.823 2.43a.5.5 0 0 1-.364.801L15 12V9.5l.33-.44a1 1 0 0 1 1-1V5a1 1 0 0 1-1-1h-.5a2 2 0 0 1-2-2H2a2 2 0 0 1-2 2v6a2 2 0 0 1 2 2h7.5a2 2 0 0 1 1.983-1.738L13.67 11H14a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h.33l-1.823-2.43a.5.5 0 0 1 .364-.801L11 5V2.5l-.33.44a1 1 0 0 1-1 .56V5H2a1 1 0 0 1-1-1V5zm11.5 2.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1z"/></svg>
+                        </button>
+                    )}
+                     {isPrivateChat && callState === 'calling' && (
+                        <button onClick={() => handleEndCall(true)} className="call-action-button decline" title="Cancelar chamada">
+                            Cancelar
+                        </button>
+                    )}
+                    {isPrivateChat && callState === 'ringing' && (
+                        <>
+                            <button onClick={handleDeclineCall} className="call-action-button decline" title="Recusar chamada">
+                                Recusar
+                            </button>
+                            <button onClick={handleAnswerCall} className="call-action-button accept" title="Aceitar chamada">
+                                Aceitar
+                            </button>
+                        </>
+                    )}
+                    {isPrivateChat && callState === 'connected' && (
+                        <button onClick={() => handleEndCall(true)} className="call-action-button decline" title="Encerrar chamada">
+                            Encerrar
                         </button>
                     )}
                     {activeRoom?.type === 'private' && (
@@ -1541,12 +1665,14 @@ const Chat = ({ user }) => {
             {callState === 'connected' ? (
                 <CallView 
                     onEndCall={handleEndCall}
-                    localStream={localStream}
+                    localStream={localDisplayStream}
                     remoteStream={remoteStream}
                     isMuted={isMuted}
                     isCameraOff={isCameraOff}
                     toggleMute={toggleMute}
                     toggleCamera={toggleCamera}
+                    isScreenSharing={isScreenSharing}
+                    toggleScreenShare={toggleScreenShare}
                 />
             ) : (
                 <>
@@ -1625,6 +1751,23 @@ const Chat = ({ user }) => {
           </>
         )}
       </main>
+      
+      {isGroupRoom && onlineUsers.length > 0 && (
+         <aside className="online-users-panel">
+            <h4>Online — {onlineUsers.length}</h4>
+            <ul className="online-users-list">
+               {onlineUsers.map(u => (
+                  <li key={u.uid} className="online-user-item" onClick={() => handleViewProfile(u.uid)}>
+                     <div className="online-user-info">
+                        <span className="status-indicator" style={{ backgroundColor: userStatuses[u.status]?.color || userStatuses.offline.color }}></span>
+                        <span>{u.displayName}</span>
+                     </div>
+                     <span className="online-user-status-text">{userStatuses[u.status]?.text || 'Offline'}</span>
+                  </li>
+               ))}
+            </ul>
+         </aside>
+      )}
 
     </div>
   );
