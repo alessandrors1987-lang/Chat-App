@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
@@ -29,7 +28,7 @@ const storage = firebase.storage();
 const peerConnectionConfig = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun1.l.google.com:19302' },
   ],
 };
 
@@ -308,7 +307,7 @@ const AuthScreen = () => {
   );
 };
 
-const UserProfileModal = ({ user, currentUser, onClose, onStartChat }) => {
+const UserProfileModal = ({ user, currentUser, onClose, onStartChat, onStartVideoCall }) => {
     if (!user) return null;
     const statusKey = user.isOnline ? user.status : 'offline';
     const status = userStatuses[statusKey] || userStatuses.offline;
@@ -328,9 +327,14 @@ const UserProfileModal = ({ user, currentUser, onClose, onStartChat }) => {
                         {status.text}
                     </div>
                     {currentUser && user.uid !== currentUser.uid && (
-                        <button className="profile-message-button" onClick={() => onStartChat(user)}>
-                            Enviar Mensagem
-                        </button>
+                        <div className="profile-modal-actions">
+                            <button className="profile-message-button" onClick={() => onStartChat(user)}>
+                                Enviar Mensagem
+                            </button>
+                             <button className="profile-call-button" onClick={() => onStartVideoCall(user)}>
+                                Iniciar Chamada
+                            </button>
+                        </div>
                     )}
                 </div>
             </div>
@@ -591,6 +595,43 @@ const CallView = ({ onEndCall, localStream, remoteStream, isMuted, isCameraOff, 
     );
 };
 
+const RoomContextMenu = ({ x, y, room, user, onClose, onRename, onLeave, onDelete }) => {
+    const menuRef = useRef(null);
+    const isCreator = user.uid === room.creator;
+
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (menuRef.current && !menuRef.current.contains(event.target)) {
+                onClose();
+            }
+        };
+        const handleEscape = (event) => {
+            if (event.key === 'Escape') {
+                onClose();
+            }
+        }
+        document.addEventListener('mousedown', handleClickOutside);
+        document.addEventListener('keydown', handleEscape);
+        return () => {
+            document.removeEventListener('mousedown', handleClickOutside);
+            document.removeEventListener('keydown', handleEscape);
+        };
+    }, [onClose]);
+
+    return (
+        <div ref={menuRef} className="context-menu" style={{ top: y, left: x }}>
+            <ul>
+                {isCreator && (
+                    <li onClick={() => { onRename(room.id, room.name); onClose(); }}>Renomear Sala</li>
+                )}
+                <li onClick={() => { onLeave(room.id); onClose(); }}>Sair da Sala</li>
+                {isCreator && room.id !== 'general' && ( // Prevent deleting the general room
+                    <li className="destructive" onClick={() => { onDelete(room.id); onClose(); }}>Excluir Sala</li>
+                )}
+            </ul>
+        </div>
+    );
+};
 
 const Chat = ({ user }) => {
   const [activeRoomId, setActiveRoomId] = useState(null);
@@ -610,20 +651,29 @@ const Chat = ({ user }) => {
   const [imagePreviewUrl, setImagePreviewUrl] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [mentionSuggestions, setMentionSuggestions] = useState([]);
+  const [hoveredMessageId, setHoveredMessageId] = useState<string | null>(null);
   
   // Modals state
   const [isCreateRoomModalOpen, setCreateRoomModalOpen] = useState(false);
   const [isJoinRoomModalOpen, setJoinRoomModalOpen] = useState(false);
   const [isInviteCodeModalOpen, setInviteCodeModalOpen] = useState(false);
+  const [generatedInviteCode, setGeneratedInviteCode] = useState('');
   const [isDiscoverModalOpen, setDiscoverModalOpen] = useState(false);
   const [enrichedPublicRooms, setEnrichedPublicRooms] = useState([]);
   const [isEnrichingRooms, setIsEnrichingRooms] = useState(false);
+
+  // Sidebar sections state
+  const [isPublicRoomsOpen, setPublicRoomsOpen] = useState(true);
+  const [isPrivateRoomsOpen, setPrivateRoomsOpen] = useState(true);
+  const [isDmsOpen, setDmsOpen] = useState(true);
 
   // User Search State
   const [userSearchQuery, setUserSearchQuery] = useState('');
   const [userSearchResults, setUserSearchResults] = useState([]);
   const [isSearchLoading, setIsSearchLoading] = useState(false);
 
+  // Context Menu State
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; room: any; } | null>(null);
 
   // WebRTC State
   const [callState, setCallState] = useState('idle'); // idle, calling, ringing, connected
@@ -644,6 +694,39 @@ const Chat = ({ user }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const callSignalingRef = useRef(null);
   const callTimerRef = useRef(null);
+
+  const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+
+    const ReactionPicker = ({ onSelect }) => (
+        <div className="reaction-picker">
+            {REACTION_EMOJIS.map(emoji => (
+                <button key={emoji} onClick={() => onSelect(emoji)} className="reaction-button" title={emoji}>
+                    {emoji}
+                </button>
+            ))}
+        </div>
+    );
+
+    const ReactionsDisplay = ({ reactions, currentUserUid, onSelect }) => (
+        <div className="reactions-container">
+            {Object.entries(reactions).map(([emoji, users]) => {
+                const userList = users ? Object.keys(users) : [];
+                if (userList.length === 0) return null;
+                const userHasReacted = userList.includes(currentUserUid);
+                return (
+                    <div 
+                        key={emoji} 
+                        className={`reaction-pill ${userHasReacted ? 'reacted' : ''}`}
+                        onClick={() => onSelect(emoji)}
+                        title={userList.length + ' reaction' + (userList.length > 1 ? 's' : '')}
+                    >
+                        <span>{emoji}</span>
+                        <span>{userList.length}</span>
+                    </div>
+                );
+            })}
+        </div>
+    );
   
   // One-time setup for public rooms
   useEffect(() => {
@@ -895,19 +978,30 @@ const Chat = ({ user }) => {
         const query = usersRef.orderByChild('displayName')
                              .startAt(trimmedQuery)
                              .endAt(trimmedQuery + '\uf8ff')
-                             .limitToFirst(10); // Limit results for performance
+                             .limitToFirst(10);
 
-        const listener = query.on('value', snapshot => {
-            const results = [];
+        const listener = query.on('value', async snapshot => {
             const data = snapshot.val();
             if (data) {
-                for (const uid in data) {
-                    if (uid !== user.uid) { // Exclude current user from results
-                        results.push({ uid, ...data[uid] });
+                const userPromises = Object.keys(data).map(async (uid) => {
+                    if (uid === user.uid) return null;
+
+                    const userObject = { uid, ...data[uid] };
+                    const statusSnapshot = await database.ref(`status/${uid}`).once('value');
+                    const statusData = statusSnapshot.val();
+                    
+                    userObject.isOnline = statusData?.state === 'online';
+                    if (!userObject.status) {
+                        userObject.status = statusData?.status || 'offline';
                     }
-                }
+                    return userObject;
+                });
+
+                const enrichedUsers = (await Promise.all(userPromises)).filter(Boolean);
+                setUserSearchResults(enrichedUsers);
+            } else {
+                setUserSearchResults([]);
             }
-            setUserSearchResults(results);
             setIsSearchLoading(false);
         });
 
@@ -931,6 +1025,23 @@ const Chat = ({ user }) => {
         const mins = Math.floor(seconds / 60).toString().padStart(2, '0');
         const secs = (seconds % 60).toString().padStart(2, '0');
         return `${mins}:${secs}`;
+    };
+
+    const handleViewProfile = async (uid) => {
+        if (!uid) return;
+        try {
+            const userSnapshot = await database.ref(`users/${uid}`).once('value');
+            if (!userSnapshot.exists()) return;
+
+            const userData = { uid, ...userSnapshot.val() };
+            const statusSnapshot = await database.ref(`status/${uid}`).once('value');
+            const statusData = statusSnapshot.val();
+
+            userData.isOnline = statusData?.state === 'online';
+            setViewingProfile(userData);
+        } catch (error) {
+            console.error("Error fetching user profile:", error);
+        }
     };
   
   const handleStopScreenShare = () => {
@@ -972,885 +1083,615 @@ const Chat = ({ user }) => {
                 };
             } catch (err) {
                 console.error("Error starting screen share:", err);
-                setLocalDisplayStream(localStream);
             }
         }
-  };
-
-  const cleanupCall = () => {
-      if (isScreenSharing) {
-        if (localDisplayStream) {
-            localDisplayStream.getTracks().forEach(track => track.stop());
+    };
+    
+    const toggleMute = () => {
+        if (localStream) {
+            localStream.getAudioTracks().forEach(track => {
+                track.enabled = !track.enabled;
+            });
+            setIsMuted(prev => !prev);
         }
-        setIsScreenSharing(false);
-      }
-      localStream?.getTracks().forEach(track => track.stop());
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close();
-        peerConnectionRef.current = null;
-      }
-      setLocalStream(null);
-      setLocalDisplayStream(null);
-      setRemoteStream(null);
-      setCallState('idle');
-      setIncomingCall(null);
-      setCallPartnerUid(null);
-      if (callSignalingRef.current) {
-          database.ref(`calls/${callSignalingRef.current}`).remove();
-          callSignalingRef.current = null;
-      }
-  };
+    };
 
-  const createPeerConnection = (callId: string, stream: MediaStream) => {
-      const pc = new RTCPeerConnection(peerConnectionConfig);
-      pc.onicecandidate = event => {
-          if (event.candidate) {
-              database.ref(`calls/${callId}/iceCandidates/${user.uid}`).push(event.candidate.toJSON());
-          }
-      };
-      pc.ontrack = event => {
-          setRemoteStream(event.streams[0]);
-      };
-      stream.getTracks().forEach(track => pc.addTrack(track, stream));
-      return pc;
-  };
-  
-  const handleStartCall = async () => {
-      const partnerUid = activeRoomId.replace('private_', '').replace(user.uid, '').replace('_','');
-      if (!partnerUid) return;
+    const toggleCamera = () => {
+        if (localStream) {
+            localStream.getVideoTracks().forEach(track => {
+                track.enabled = !track.enabled;
+            });
+            setIsCameraOff(prev => !prev);
+        }
+    };
 
-      setCallPartnerUid(partnerUid);
-      setCallState('calling');
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        setLocalStream(stream);
-        setLocalDisplayStream(stream);
+    const setupPeerConnection = (stream) => {
+        const pc = new RTCPeerConnection(peerConnectionConfig);
+        stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
-        const callId = `call_${user.uid}_${partnerUid}`;
-        callSignalingRef.current = callId;
-        peerConnectionRef.current = createPeerConnection(callId, stream);
-
-        const offer = await peerConnectionRef.current.createOffer();
-        await peerConnectionRef.current.setLocalDescription(offer);
-
-        const callData = {
-            offer: offer.toJSON(),
-            from: user.uid,
-            fromName: user.displayName,
-            target: partnerUid
+        pc.onicecandidate = (event) => {
+            if (event.candidate && callSignalingRef.current) {
+                database.ref(`calls/${callSignalingRef.current}/iceCandidates/${user.uid}`).push(event.candidate.toJSON());
+            }
         };
-        await database.ref(`calls/${callId}`).set(callData);
-        setCallState('connected');
-      } catch (err) {
-        console.error("Error starting call:", err);
-        alert("Não foi possível iniciar a chamada. Verifique as permissões da câmera/microfone e tente novamente.");
-        cleanupCall();
-      }
-  };
 
-  const handleAnswerCall = async () => {
-      if (!incomingCall) return;
-      
-      setCallPartnerUid(incomingCall.from);
-      setCallState('connecting');
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        setLocalStream(stream);
-        setLocalDisplayStream(stream);
-
-        callSignalingRef.current = incomingCall.callId;
-        peerConnectionRef.current = createPeerConnection(incomingCall.callId, stream);
-
-        await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(incomingCall.offer));
-        const answer = await peerConnectionRef.current.createAnswer();
-        await peerConnectionRef.current.setLocalDescription(answer);
-
-        await database.ref(`calls/${incomingCall.callId}`).update({ answer: answer.toJSON() });
-        setCallState('connected');
-        setIncomingCall(null);
-      } catch (err) {
-        console.error("Error answering call:", err);
-        alert("Não foi possível atender a chamada. Verifique as permissões da câmera/microfone e tente novamente.");
-        cleanupCall();
-      }
-  };
-  
-  const handleDeclineCall = () => {
-      if (incomingCall) {
-          database.ref(`calls/${incomingCall.callId}`).update({ status: 'ended' });
-      }
-      cleanupCall();
-  };
-
-  const handleEndCall = (notify = true) => {
-      if (notify && callSignalingRef.current) {
-          database.ref(`calls/${callSignalingRef.current}`).update({ status: 'ended' });
-      }
-      cleanupCall();
-  };
-
-  const toggleMute = () => {
-      if (localStream) {
-          localStream.getAudioTracks()[0].enabled = !isMuted;
-          setIsMuted(!isMuted);
-      }
-  };
-
-  const toggleCamera = () => {
-      if (localStream) {
-          localStream.getVideoTracks()[0].enabled = !isCameraOff;
-          setIsCameraOff(!isCameraOff);
-      }
-  };
-
-  const handleRoomSelect = (roomId) => {
-    if (roomId === activeRoomId) return;
-    setMessages([]);
-    setTypingUsers([]);
-    setActiveRoomId(roomId);
-  };
-  
-  const handleCreateRoom = async (name: string, isPrivate: boolean) => {
-    const newRoomRef = database.ref('rooms').push();
-    const newRoomId = newRoomRef.key;
-    
-    const newRoomData: any = {
-        id: newRoomId,
-        name: name,
-        type: isPrivate ? 'private' : 'public',
-        creator: user.uid,
-    };
-    
-    if (isPrivate) {
-        newRoomData.inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-        await database.ref(`users/${user.uid}/privateRooms/${newRoomId}`).set(true);
-    } else {
-        await database.ref(`users/${user.uid}/publicRooms/${newRoomId}`).set(true);
-    }
-    
-    await newRoomRef.set(newRoomData);
-    
-    handleRoomSelect(newRoomId);
-    setCreateRoomModalOpen(false);
-  };
-  
-  const handleJoinRoomWithCode = async (code: string) => {
-      const roomsRef = database.ref('rooms');
-      const snapshot = await roomsRef.orderByChild('inviteCode').equalTo(code).limitToFirst(1).once('value');
-      
-      if (snapshot.exists()) {
-          const [roomId, roomData] = Object.entries(snapshot.val())[0];
-          await database.ref(`users/${user.uid}/privateRooms/${roomId}`).set(true);
-          handleRoomSelect(roomId);
-          setJoinRoomModalOpen(false);
-          return true;
-      }
-      return false;
-  };
-  
-  const handleJoinPublicRoom = (roomId) => {
-      database.ref(`users/${user.uid}/publicRooms/${roomId}`).set(true);
-  };
-
-  const handleLeavePublicRoom = (roomId: string) => {
-    if (window.confirm("Tem certeza de que deseja sair desta sala pública?")) {
-        database.ref(`users/${user.uid}/publicRooms/${roomId}`).remove();
-        if (activeRoomId === roomId) {
-            setActiveRoomId(null);
-        }
-    }
-  };
-
-
-  const handleLeavePrivateRoom = (roomId: string) => {
-    if (window.confirm("Tem certeza de que deseja sair desta sala privada?")) {
-        database.ref(`users/${user.uid}/privateRooms/${roomId}`).remove();
-        if (activeRoomId === roomId) {
-            setActiveRoomId(null);
-        }
-    }
-  };
-
-  const handleLeavePrivateChat = async (e, partnerId, partnerName) => {
-    e.stopPropagation();
-    if (window.confirm(`Tem certeza de que deseja remover a conversa com ${partnerName}? Esta ação removerá a conversa para ambos os usuários e não pode ser desfeita.`)) {
-        const myUid = user.uid;
-        try {
-            await database.ref(`users/${myUid}/privateChats/${partnerId}`).remove();
-            await database.ref(`users/${partnerId}/privateChats/${myUid}`).remove();
-    
-            const privateRoomId = `private_${[myUid, partnerId].sort().join('_')}`;
-            if (activeRoomId === privateRoomId) {
-                setActiveRoomId(null);
+        pc.ontrack = (event) => {
+            setRemoteStream(event.streams[0]);
+        };
+        
+        pc.onconnectionstatechange = () => {
+            if (pc.connectionState === 'connected') {
+                setCallState('connected');
+            } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+                handleEndCall(false);
             }
-        } catch (error) {
-            console.error("Error leaving private chat:", error);
-            alert("Não foi possível remover a conversa. Tente novamente.");
-        }
-    }
-  };
+        };
 
-  const handleSendMessage = async (e) => {
-    e.preventDefault();
-    if ((currentMessage.trim() === '' && !imageToSend) || !activeRoomId || isUploading) return;
-
-    setIsUploading(true);
-
-    let imageUrl = null;
-    if (imageToSend) {
+        return pc;
+    };
+    
+    const handleStartVideoCall = async (targetUser) => {
+        if (!targetUser || callState !== 'idle') return;
+        
+        setCallPartnerUid(targetUser.uid);
+        
         try {
-            const filePath = `chat_images/${activeRoomId}/${user.uid}_${Date.now()}_${imageToSend.name}`;
-            const fileRef = storage.ref(filePath);
-            const uploadTask = await fileRef.put(imageToSend);
-            imageUrl = await uploadTask.ref.getDownloadURL();
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            setLocalStream(stream);
+            setLocalDisplayStream(stream);
+
+            peerConnectionRef.current = setupPeerConnection(stream);
+            
+            const callId = database.ref('calls').push().key;
+            callSignalingRef.current = callId;
+            
+            const offer = await peerConnectionRef.current.createOffer();
+            await peerConnectionRef.current.setLocalDescription(offer);
+
+            await database.ref(`calls/${callId}`).set({
+                from: user.uid,
+                fromName: user.displayName,
+                target: targetUser.uid,
+                offer: offer.toJSON(),
+                status: 'calling',
+            });
+
+            setCallState('calling');
+            setViewingProfile(null);
+
         } catch (error) {
-            console.error("Erro ao enviar imagem:", error);
-            setIsUploading(false);
-            return;
+            console.error("Error starting video call:", error);
+            // Reset state on error
+            setCallState('idle');
+            setCallPartnerUid(null);
         }
-    }
+    };
+    
+    const handleAcceptCall = async () => {
+        if (!incomingCall) return;
 
-    if (typingTimeoutRef.current) {
-        clearTimeout(typingTimeoutRef.current);
-    }
-    database.ref(`typing/${activeRoomId}/${user.uid}`).remove();
+        setCallPartnerUid(incomingCall.from);
 
-    const isPrivateChat = activeRoomId.startsWith('private_');
-    const messagePath = isPrivateChat ? `private_messages/${activeRoomId}` : `messages/${activeRoomId}`;
-    const roomMessagesRef = database.ref(messagePath);
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            setLocalStream(stream);
+            setLocalDisplayStream(stream);
 
-    const newMessage = {
-      text: currentMessage,
-      senderId: user.uid,
-      senderName: user.displayName || user.email,
-      timestamp: firebase.database.ServerValue.TIMESTAMP,
-      imageUrl: imageUrl
+            peerConnectionRef.current = setupPeerConnection(stream);
+
+            callSignalingRef.current = incomingCall.callId;
+
+            await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(incomingCall.offer));
+
+            const answer = await peerConnectionRef.current.createAnswer();
+            await peerConnectionRef.current.setLocalDescription(answer);
+
+            await database.ref(`calls/${incomingCall.callId}`).update({
+                answer: answer.toJSON(),
+                status: 'connected',
+            });
+
+            setCallState('connected');
+            setIncomingCall(null);
+        } catch (error) {
+            console.error("Error accepting call:", error);
+        }
+    };
+    
+    const handleDeclineCall = async () => {
+        if (incomingCall) {
+            await database.ref(`calls/${incomingCall.callId}`).update({ status: 'declined' });
+        }
+        setIncomingCall(null);
+        setCallState('idle');
     };
 
-    roomMessagesRef.push(newMessage);
+    const handleEndCall = (isInitiator = true) => {
+        if (isInitiator && callSignalingRef.current) {
+            database.ref(`calls/${callSignalingRef.current}`).update({ status: 'ended' });
+        }
+        
+        peerConnectionRef.current?.close();
+        peerConnectionRef.current = null;
+        
+        localStream?.getTracks().forEach(track => track.stop());
+        localDisplayStream?.getTracks().forEach(track => track.stop());
+        
+        setLocalStream(null);
+        setRemoteStream(null);
+        setLocalDisplayStream(null);
+        setCallState('idle');
+        setIncomingCall(null);
+        setCallPartnerUid(null);
+        callSignalingRef.current = null;
+        setIsMuted(false);
+        setIsCameraOff(false);
+        setIsScreenSharing(false);
+    };
 
-    // Handle notifications for mentions
-    const currentActiveRoom = [...joinedPublicRooms, ...privateRooms].find(r => r.id === activeRoomId);
-    const mentionedUsers = onlineUsers.filter(u => 
-        currentMessage.includes(`@${u.displayName}`) && u.uid !== user.uid
-    );
+  const handleSendMessage = (e) => {
+    e.preventDefault();
+    if (!currentMessage.trim() && !imageToSend) return;
 
-    mentionedUsers.forEach(mentionedUser => {
-        database.ref(`notifications/${mentionedUser.uid}`).push({
-            senderName: user.displayName,
-            roomName: isPrivateChat ? `Direct Message` : currentActiveRoom?.name,
-            roomId: activeRoomId,
-            message: currentMessage,
-            timestamp: firebase.database.ServerValue.TIMESTAMP,
-            read: false,
-        });
-    });
+    // FIX: Explicitly type messageData as 'any' to allow adding the 'imageUrl' property dynamically.
+    const messageData: any = {
+      text: currentMessage,
+      sender: user.displayName,
+      uid: user.uid,
+      timestamp: firebase.database.ServerValue.TIMESTAMP,
+    };
+    
+    const isPrivate = activeRoomId.startsWith('private_');
+    const messagePath = isPrivate ? `private_messages/${activeRoomId}` : `messages/${activeRoomId}`;
+    const messagesRef = database.ref(messagePath);
+
+    if (imageToSend) {
+        setIsUploading(true);
+        const filePath = `images/${activeRoomId}/${new Date().getTime()}-${imageToSend.name}`;
+        const storageRef = storage.ref(filePath);
+        const uploadTask = storageRef.put(imageToSend);
+
+        uploadTask.on(
+            'state_changed',
+            null,
+            (error) => {
+                console.error('Upload failed:', error);
+                setIsUploading(false);
+            },
+            () => {
+                uploadTask.snapshot.ref.getDownloadURL().then((downloadURL) => {
+                    messageData.imageUrl = downloadURL;
+                    messagesRef.push(messageData);
+                    setImageToSend(null);
+                    setImagePreviewUrl('');
+                    setIsUploading(false);
+                });
+            }
+        );
+    } else {
+        messagesRef.push(messageData);
+    }
 
     setCurrentMessage('');
-    setImageToSend(null);
-    setImagePreviewUrl('');
-    setMentionSuggestions([]);
-    setIsUploading(false);
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+      database.ref(`typing/${activeRoomId}/${user.uid}`).remove();
+    }
   };
 
-  const handleDeleteMessage = async (messageId) => {
-    if (!activeRoomId || !messageId) return;
+  const handleInputChange = (e) => {
+    setCurrentMessage(e.target.value);
 
-    if (window.confirm("Tem certeza de que deseja excluir esta mensagem?")) {
+    const isPrivate = activeRoomId && activeRoomId.startsWith('private_');
+    const typingRef = database.ref(`typing/${activeRoomId}/${user.uid}`);
+    
+    if (e.target.value.trim().length > 0) {
+      typingRef.set({ displayName: user.displayName });
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = setTimeout(() => {
+        typingRef.remove();
+        typingTimeoutRef.current = null;
+      }, 3000);
+    } else {
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      typingRef.remove();
+    }
+  };
+  
+    const handleFileSelect = (e) => {
+        if (e.target.files && e.target.files[0]) {
+            const file = e.target.files[0];
+            setImageToSend(file);
+            setImagePreviewUrl(URL.createObjectURL(file));
+        }
+    };
+
+    const handleReaction = (messageId, emoji) => {
+        if (!messageId) return;
         const isPrivate = activeRoomId.startsWith('private_');
         const messagePath = isPrivate ? `private_messages/${activeRoomId}` : `messages/${activeRoomId}`;
-        const messageRef = database.ref(`${messagePath}/${messageId}`);
+        const reactionRef = database.ref(`${messagePath}/${messageId}/reactions/${emoji}/${user.uid}`);
 
-        try {
-            await messageRef.update({
-                text: 'Esta mensagem foi excluída.',
-                imageUrl: null, // Ensure image is removed
-                deleted: true
-            });
-        } catch (error) {
-            console.error("Error deleting message:", error);
-            alert("Não foi possível excluir a mensagem. Tente novamente.");
-        }
-    }
-  };
-
-
-  const handleTyping = (e) => {
-    const text = e.target.value;
-    setCurrentMessage(text);
-
-    const mentionMatch = text.match(/@(\w*)$/);
-    if (mentionMatch) {
-      mentionQueryRef.current = mentionMatch[1].toLowerCase();
-      const suggestions = onlineUsers.filter(u => 
-        u.displayName.toLowerCase().includes(mentionQueryRef.current) && u.uid !== user.uid
-      );
-      setMentionSuggestions(suggestions);
-    } else {
-      setMentionSuggestions([]);
-    }
-
-    if (!activeRoomId) return;
-    const userTypingRef = database.ref(`typing/${activeRoomId}/${user.uid}`);
-    if (typingTimeoutRef.current) {
-        clearTimeout(typingTimeoutRef.current);
-    }
-    if (text.trim()) {
-        userTypingRef.set({ displayName: user.displayName });
-        typingTimeoutRef.current = setTimeout(() => {
-            userTypingRef.remove();
-        }, 2000);
-    } else {
-        userTypingRef.remove();
-    }
-  };
-
-  const handleSelectMention = (displayName) => {
-    const newText = currentMessage.replace(/@\w*$/, `@${displayName} `);
-    setCurrentMessage(newText);
-    setMentionSuggestions([]);
-    (document.querySelector('.message-input') as HTMLInputElement)?.focus();
-  };
-  
-  const formatTypingMessage = (users) => {
-    if (users.length === 0) return '';
-    if (users.length === 1) return `${users[0]} está digitando...`;
-    if (users.length === 2) return `${users[0]} e ${users[1]} estão digitando...`;
-    return `${users.slice(0, 2).join(', ')} e outros estão digitando...`;
-  };
-
-  const handleLogout = () => {
-    auth.signOut();
-  };
-  
-  const handleViewProfile = async (userId) => {
-    if (!userId) return;
-    setViewingProfile({ displayName: 'Carregando...' });
-    try {
-        const userSnapshot = await database.ref('users/' + userId).once('value');
-        const statusSnapshot = await database.ref('status/' + userId).once('value');
-        const userData = userSnapshot.val();
-        const statusData = statusSnapshot.val();
-        
-        if (userData && typeof userData === 'object') {
-            const isOnline = statusData && statusData.state === 'online';
-            setViewingProfile({ ...userData, uid: userId, isOnline, status: isOnline ? statusData.status : 'offline' });
-        } else {
-            setViewingProfile({ displayName: 'Usuário não encontrado', uid: userId, isOnline: false, status: 'offline' });
-        }
-    } catch (error) {
-        setViewingProfile({ displayName: 'Erro ao carregar', uid: userId, isOnline: false, status: 'offline' });
-    }
-  };
-  
-  const handleStartPrivateChat = async (otherUser) => {
-    const sortedUIDs = [user.uid, otherUser.uid].sort();
-    const privateRoomId = `private_${sortedUIDs[0]}_${sortedUIDs[1]}`;
-    
-    await database.ref(`users/${user.uid}/privateChats/${otherUser.uid}`).set({
-      displayName: otherUser.displayName,
-    });
-    await database.ref(`users/${otherUser.uid}/privateChats/${user.uid}`).set({
-      displayName: user.displayName,
-    });
-    
-    handleRoomSelect(privateRoomId);
-    handleCloseProfile();
-  };
-
-  const handleSelectSearchedUser = (searchedUser) => {
-      handleViewProfile(searchedUser.uid);
-      // Clear search after selection to hide the dropdown
-      setUserSearchQuery('');
-      setUserSearchResults([]);
-  };
-
-  const handleCloseProfile = () => setViewingProfile(null);
-
-  const handleStatusChange = (newStatus) => {
-    setMyStatus(newStatus);
-    database.ref(`users/${user.uid}/status`).set(newStatus);
-    database.ref(`status/${user.uid}/status`).set(newStatus);
-  };
-  
-  const handleOpenDiscoverModal = async () => {
-    setDiscoverModalOpen(true);
-    setIsEnrichingRooms(true);
-
-    const enrichedDataPromises = allPublicRooms.map(async (room: any) => {
-      // Fetch user count from presences
-      const presenceRef = database.ref(`presences/${room.id}`);
-      const presenceSnapshot = await presenceRef.once('value');
-      const userCount = presenceSnapshot.numChildren();
-
-      // Fetch creator's display name
-      let creatorName = 'Sistema';
-      if (room.creator && room.creator !== 'system') {
-        try {
-          const userRef = database.ref(`users/${room.creator}/displayName`);
-          const userSnapshot = await userRef.once('value');
-          creatorName = userSnapshot.val() || 'Desconhecido';
-        } catch (e) {
-          console.error(`Could not fetch creator name for user ${room.creator}`, e);
-          creatorName = 'Desconhecido';
-        }
-      }
-      
-      return { ...room, userCount, creatorName };
-    });
-
-    try {
-      const results = await Promise.all(enrichedDataPromises);
-      setEnrichedPublicRooms(results);
-    } catch (error) {
-      console.error("Error enriching public rooms data:", error);
-      setEnrichedPublicRooms(allPublicRooms.map((room: any) => ({...room, userCount: 0, creatorName: 'N/A'})));
-    } finally {
-      setIsEnrichingRooms(false);
-    }
-  };
-
-  const renderMessageWithMentions = (text) => {
-    const parts = text.split(/(@\w+)/g);
-    return parts.map((part, index) => {
-        if (part.startsWith('@')) {
-            const username = part.substring(1);
-            const isMe = username === user.displayName;
-            const isUserOnline = onlineUsers.some(u => u.displayName === username);
-
-            if (isUserOnline) {
-                return (
-                    <span key={index} className={`mention-highlight ${isMe ? 'self' : ''}`}>
-                        {part}
-                    </span>
-                );
+        reactionRef.once('value', snapshot => {
+            if (snapshot.exists()) {
+                reactionRef.remove();
+            } else {
+                reactionRef.set(true);
             }
-        }
-        return part;
-    });
-  };
-  
-  const handleImageSelectClick = () => {
-    fileInputRef.current?.click();
-  };
+        });
+        setHoveredMessageId(null);
+    };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (file && file.type.startsWith('image/')) {
-          setImageToSend(file);
-          setImagePreviewUrl(URL.createObjectURL(file));
+    const handleStartPrivateChat = async (targetUser) => {
+        const chatId = user.uid < targetUser.uid 
+            ? `private_${user.uid}_${targetUser.uid}` 
+            : `private_${targetUser.uid}_${user.uid}`;
+        
+        const currentUserChatRef = database.ref(`users/${user.uid}/privateChats/${targetUser.uid}`);
+        const targetUserChatRef = database.ref(`users/${targetUser.uid}/privateChats/${user.uid}`);
+
+        await currentUserChatRef.update({
+            displayName: targetUser.displayName,
+            uid: targetUser.uid,
+        });
+
+        await targetUserChatRef.update({
+            displayName: user.displayName,
+            uid: user.uid,
+        });
+        
+        setActiveRoomId(chatId);
+        setViewingProfile(null); // Close profile modal after starting chat
+    };
+    
+    const handleCreateRoom = async (name, isPrivate) => {
+      const newRoomRef = database.ref('rooms').push();
+      const newRoomId = newRoomRef.key;
+      const newRoom = {
+          id: newRoomId,
+          name,
+          type: isPrivate ? 'private' : 'public',
+          creator: user.uid,
+          createdAt: firebase.database.ServerValue.TIMESTAMP
+      };
+
+      const updates = {};
+      updates[`/rooms/${newRoomId}`] = newRoom;
+      const roomTypeKey = isPrivate ? 'privateRooms' : 'publicRooms';
+      updates[`/users/${user.uid}/${roomTypeKey}/${newRoomId}`] = true;
+
+      if (isPrivate) {
+          const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+          updates[`/invites/${code}`] = { roomId: newRoomId, creator: user.uid };
+          setGeneratedInviteCode(code);
+          setInviteCodeModalOpen(true);
       }
-      e.target.value = '';
-  };
 
-  const removeImageToSend = () => {
-      setImageToSend(null);
-      setImagePreviewUrl('');
-  };
+      await database.ref().update(updates);
+      setCreateRoomModalOpen(false);
+      setActiveRoomId(newRoomId);
+    };
 
+    const handleJoinRoomByCode = async (code) => {
+      const inviteRef = database.ref(`invites/${code}`);
+      const snapshot = await inviteRef.once('value');
+      if (snapshot.exists()) {
+          const { roomId } = snapshot.val();
+          const roomRef = database.ref(`rooms/${roomId}`);
+          const roomSnapshot = await roomRef.once('value');
+          if(roomSnapshot.exists()) {
+             const roomTypeKey = roomSnapshot.val().type === 'private' ? 'privateRooms' : 'publicRooms';
+             await database.ref(`users/${user.uid}/${roomTypeKey}/${roomId}`).set(true);
+             setJoinRoomModalOpen(false);
+             setActiveRoomId(roomId);
+             return true;
+          }
+      }
+      return false;
+    };
 
-  const isPrivateChat = activeRoomId && activeRoomId.startsWith('private_');
-  const allRooms = [...joinedPublicRooms, ...privateRooms];
-  const activeRoom = !isPrivateChat ? allRooms.find(r => r.id === activeRoomId) : null;
-  const isGroupRoom = activeRoomId && !activeRoomId.startsWith('private_');
+    const handleJoinPublicRoomFromDiscover = async (roomId) => {
+      await database.ref(`users/${user.uid}/publicRooms/${roomId}`).set(true);
+      setActiveRoomId(roomId);
+    };
   
-  let chatPartner = null;
-  if(isPrivateChat) {
-      const partnerUid = activeRoomId.replace('private_', '').replace(user.uid, '').replace('_','');
-      chatPartner = privateChats.find(p => p.uid === partnerUid);
+  if (callState === 'connected' || callState === 'calling') {
+    return <CallView 
+                onEndCall={handleEndCall}
+                localStream={localDisplayStream}
+                remoteStream={remoteStream}
+                isMuted={isMuted}
+                isCameraOff={isCameraOff}
+                toggleMute={toggleMute}
+                toggleCamera={toggleCamera}
+                isScreenSharing={isScreenSharing}
+                toggleScreenShare={toggleScreenShare}
+            />;
   }
 
   return (
     <div className="app-container">
-      {viewingProfile && <UserProfileModal user={viewingProfile} currentUser={user} onStartChat={handleStartPrivateChat} onClose={handleCloseProfile} />}
-      {viewingImage && <ImageModal imageUrl={viewingImage} onClose={() => setViewingImage(null)} />}
-      {isCreateRoomModalOpen && <CreateRoomModal onCreate={handleCreateRoom} onClose={() => setCreateRoomModalOpen(false)} />}
-      {isJoinRoomModalOpen && <JoinRoomModal onJoin={handleJoinRoomWithCode} onClose={() => setJoinRoomModalOpen(false)} />}
-      {isInviteCodeModalOpen && activeRoom?.inviteCode && <InviteCodeModal code={activeRoom.inviteCode} onClose={() => setInviteCodeModalOpen(false)} />}
+      {isCreateRoomModalOpen && <CreateRoomModal onClose={() => setCreateRoomModalOpen(false)} onCreate={handleCreateRoom} />}
+      {isJoinRoomModalOpen && <JoinRoomModal onClose={() => setJoinRoomModalOpen(false)} onJoin={handleJoinRoomByCode} />}
+      {isInviteCodeModalOpen && <InviteCodeModal code={generatedInviteCode} onClose={() => setInviteCodeModalOpen(false)} />}
       {isDiscoverModalOpen && 
         <DiscoverRoomsModal 
-            allPublicRooms={enrichedPublicRooms}
+            allPublicRooms={allPublicRooms}
             isLoading={isEnrichingRooms}
             joinedRoomIds={joinedPublicRooms.map(r => r.id)}
-            onJoin={handleJoinPublicRoom}
-            onClose={() => setDiscoverModalOpen(false)} 
+            onJoin={handleJoinPublicRoomFromDiscover}
+            onClose={() => setDiscoverModalOpen(false)}
+        />}
+      {incomingCall && (
+        <IncomingCallModal
+          caller={incomingCall.fromName}
+          onAccept={handleAcceptCall}
+          onDecline={handleDeclineCall}
         />
-      }
-      {callState === 'ringing' && incomingCall && (
-          <IncomingCallModal 
-              caller={incomingCall.fromName}
-              onAccept={handleAnswerCall}
-              onDecline={handleDeclineCall}
-          />
       )}
-      <aside className="sidebar">
+      {viewingProfile && (
+        <UserProfileModal 
+            user={viewingProfile} 
+            currentUser={user}
+            onClose={() => setViewingProfile(null)}
+            onStartChat={handleStartPrivateChat}
+            onStartVideoCall={handleStartVideoCall}
+        />
+      )}
+      <div className="sidebar">
         <div>
-          <header className="sidebar-header">
-            <h2>Salas</h2>
-            <button onClick={handleLogout} className="logout-button">Sair</button>
-          </header>
+          <div className="sidebar-header">
+            <span>Chat</span>
+            <button onClick={() => auth.signOut()} className="logout-button">Sair</button>
+          </div>
           <div className="sidebar-actions">
-              <button onClick={() => setCreateRoomModalOpen(true)} className="sidebar-action-button">Criar Sala</button>
-              <button onClick={() => setJoinRoomModalOpen(true)} className="sidebar-action-button">Entrar com Código</button>
-              <button onClick={handleOpenDiscoverModal} className="sidebar-action-button">Descobrir Salas</button>
+             <button onClick={() => setCreateRoomModalOpen(true)} className="sidebar-action-button">Criar Sala</button>
+             <button onClick={() => setJoinRoomModalOpen(true)} className="sidebar-action-button">Entrar com Código</button>
+             <button onClick={() => setDiscoverModalOpen(true)} className="sidebar-action-button">Descobrir Salas</button>
           </div>
           <div className="user-search-container">
-              <input
-                  type="text"
-                  placeholder="Buscar usuários..."
-                  value={userSearchQuery}
-                  onChange={(e) => setUserSearchQuery(e.target.value)}
-                  className="user-search-input"
-              />
-              {userSearchQuery.trim().length > 1 && (
-                  <ul className="user-search-results">
-                      {isSearchLoading && <li className="search-result-item loading">Buscando...</li>}
-                      {!isSearchLoading && userSearchResults.length === 0 && (
-                          <li className="search-result-item none">Nenhum usuário encontrado.</li>
-                      )}
-                      {userSearchResults.map(u => (
-                          <li key={u.uid} className="search-result-item" onClick={() => handleSelectSearchedUser(u)}>
-                              {u.displayName}
-                          </li>
-                      ))}
-                  </ul>
-              )}
+            <input
+                type="search"
+                placeholder="Buscar usuários..."
+                className="user-search-input"
+                value={userSearchQuery}
+                onChange={(e) => setUserSearchQuery(e.target.value)}
+                aria-label="Buscar usuários"
+            />
+            {userSearchQuery.length >= 2 && (
+                <div className="user-search-results">
+                    {isSearchLoading && <div className="user-search-item loading">Buscando...</div>}
+                    {!isSearchLoading && userSearchResults.length === 0 && (
+                        <div className="user-search-item not-found">Nenhum usuário encontrado.</div>
+                    )}
+                    {!isSearchLoading && userSearchResults.map(foundUser => (
+                        <div
+                            key={foundUser.uid}
+                            className="user-search-item"
+                            onClick={() => {
+                                setViewingProfile(foundUser);
+                                setUserSearchQuery('');
+                            }}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                   setViewingProfile(foundUser);
+                                   setUserSearchQuery('');
+                                }
+                            }}
+                        >
+                            {foundUser.displayName}
+                        </div>
+                    ))}
+                </div>
+            )}
           </div>
-          <h3 className="sidebar-subheader">Salas Públicas</h3>
-          <ul className="room-list">
-            {joinedPublicRooms.map(room => (
-              <li key={room.id} className={`room-item joined ${room.id === activeRoomId ? 'active' : ''}`} onClick={() => handleRoomSelect(room.id)}>
-                <span className="room-name-wrapper">
-                    <svg className="public-room-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 1h1v14h-1V1zm4 0h1v14h-1V1zM1 5.5h14v1H1v-1zm0 4h14v1H1v-1z"/></svg>
-                    <span className="room-name">{room.name}</span>
-                </span>
-                 <button 
-                    className="leave-private-chat-button" 
-                    title={`Sair da sala ${room.name}`} 
-                    onClick={(e) => { e.stopPropagation(); handleLeavePublicRoom(room.id); }}
-                >
-                    Sair
-                </button>
-              </li>
-            ))}
-          </ul>
-           <h3 className="sidebar-subheader">Salas Privadas</h3>
-          <ul className="room-list">
-              {privateRooms.map(room => (
-                  <li key={room.id} className={`room-item joined ${room.id === activeRoomId ? 'active' : ''}`} onClick={() => handleRoomSelect(room.id)}>
-                    <span className="room-name-wrapper">
-                        <svg className="private-room-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/></svg>
+          
+            <div className="sidebar-section-header" onClick={() => setPublicRoomsOpen(!isPublicRoomsOpen)}>
+                <h4>Canais Públicos</h4>
+                 <svg className={`section-toggle-icon ${!isPublicRoomsOpen ? 'collapsed' : ''}`} xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path fillRule="evenodd" d="M7.646 4.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1-.708.708L8 5.707l-5.646 5.647a.5.5 0 0 1-.708-.708l6-6z" transform="rotate(90 8 8) translate(0 4)"/></svg>
+            </div>
+             <ul className={`room-list ${!isPublicRoomsOpen ? 'collapsed' : ''}`}>
+                {joinedPublicRooms.map(room => (
+                  <li key={room.id} className={`room-item joined ${activeRoomId === room.id ? 'active' : ''}`} onClick={() => setActiveRoomId(room.id)}>
+                    <div className="room-name-wrapper">
+                         <svg className="room-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8.38 5.68a.5.5 0 0 1 .64-.02l.01.02A3.5 3.5 0 0 1 12.5 9V5.5a.5.5 0 0 1 1 0V9a4.5 4.5 0 0 1-4.5 4.5h-.01a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h.01a3.5 3.5 0 0 1 3.5-3.5H12a.5.5 0 0 1 0-1H9.03a.5.5 0 0 1-.64.02l-.01-.02zm-5.32-1a.5.5 0 0 1-.02.64l.02.01A3.5 3.5 0 0 1 3.5 7H7a.5.5 0 0 1 0 1H3.5a4.5 4.5 0 0 1-4.5-4.5v-.01a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v.01a3.5 3.5 0 0 1 3.5 3.5h.01a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-.01A4.5 4.5 0 0 1 3.5 7V3.5a.5.5 0 0 1 1 0V7a3.5 3.5 0 0 1-3.5-3.5h-.01a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h.01a4.5 4.5 0 0 1 4.5 4.5zm-2.06 6.52a.5.5 0 0 1 .64-.02l.01.02a3.5 3.5 0 0 1 3.45 3.45h.01a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-.01a4.5 4.5 0 0 1-4.5-4.5v-.01a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v.01a3.5 3.5 0 0 1 3.5 3.5zm7.38-3.98a.5.5 0 0 1 .02.64l-.02.01a3.5 3.5 0 0 1-3.45-3.45h-.01a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h.01a4.5 4.5 0 0 1 4.5 4.5v.01a.5.5 0 0 1-.5.5h-1a.5.5 0 0 1-.5-.5v-.01a3.5 3.5 0 0 1-3.5-3.5z"/></svg>
                         <span className="room-name">{room.name}</span>
-                    </span>
-                    <button 
-                        className="leave-private-chat-button" 
-                        title={`Sair da sala ${room.name}`} 
-                        onClick={(e) => { e.stopPropagation(); handleLeavePrivateRoom(room.id); }}
-                    >
-                        Sair
-                    </button>
+                    </div>
                   </li>
-              ))}
-          </ul>
-          <h3 className="sidebar-subheader">Mensagens Diretas</h3>
-          <ul className="room-list">
-              {privateChats.map(chat => {
-                  const partnerStatus = partnerStatuses[chat.uid] || { state: 'offline', status: 'offline' };
-                  const isOnline = partnerStatus.state === 'online';
-                  const statusInfo = isOnline ? userStatuses[partnerStatus.status] : userStatuses.offline;
-                  const privateRoomId = `private_${[user.uid, chat.uid].sort().join('_')}`;
-                  
-                  return (
-                      <li key={chat.uid} className={`room-item private-chat ${privateRoomId === activeRoomId ? 'active' : ''}`} onClick={() => handleRoomSelect(privateRoomId)}>
-                          <div className="private-chat-info">
-                            <span className="status-indicator" style={{ backgroundColor: statusInfo?.color || '#6c757d' }}></span>
-                            <span className="room-name">{chat.displayName}</span>
-                          </div>
-                          <button 
-                              className="leave-private-chat-button" 
-                              title={`Remover conversa com ${chat.displayName}`} 
-                              onClick={(e) => handleLeavePrivateChat(e, chat.uid, chat.displayName)}
-                          >
-                              &times;
-                          </button>
-                      </li>
-                  );
-              })}
-          </ul>
-        </div>
-        <div className="sidebar-footer">
-          <StatusSelector user={user} currentStatus={myStatus} onStatusChange={handleStatusChange} />
-        </div>
-      </aside>
+                ))}
+              </ul>
 
-      <main className="main-content">
-        {!activeRoomId ? (
+            <div className="sidebar-section-header" onClick={() => setPrivateRoomsOpen(!isPrivateRoomsOpen)}>
+                <h4>Salas Privadas</h4>
+                <svg className={`section-toggle-icon ${!isPrivateRoomsOpen ? 'collapsed' : ''}`} xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path fillRule="evenodd" d="M7.646 4.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1-.708.708L8 5.707l-5.646 5.647a.5.5 0 0 1-.708-.708l6-6z" transform="rotate(90 8 8) translate(0 4)"/></svg>
+            </div>
+            <ul className={`room-list ${!isPrivateRoomsOpen ? 'collapsed' : ''}`}>
+                {privateRooms.map(room => (
+                  <li key={room.id} className={`room-item joined ${activeRoomId === room.id ? 'active' : ''}`} onClick={() => setActiveRoomId(room.id)}>
+                    <div className="room-name-wrapper">
+                        <svg className="room-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/></svg>
+                        <span className="room-name">{room.name}</span>
+                    </div>
+                  </li>
+                ))}
+            </ul>
+
+            <div className="sidebar-section-header" onClick={() => setDmsOpen(!isDmsOpen)}>
+                <h4>Conversas</h4>
+                <svg className={`section-toggle-icon ${!isDmsOpen ? 'collapsed' : ''}`} xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path fillRule="evenodd" d="M7.646 4.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1-.708.708L8 5.707l-5.646 5.647a.5.5 0 0 1-.708-.708l6-6z" transform="rotate(90 8 8) translate(0 4)"/></svg>
+            </div>
+            <ul className={`room-list ${!isDmsOpen ? 'collapsed' : ''}`}>
+                {privateChats.map(chat => {
+                    const chatId = user.uid < chat.uid 
+                        ? `private_${user.uid}_${chat.uid}` 
+                        : `private_${chat.uid}_${user.uid}`;
+                    const partnerStatus = partnerStatuses[chat.uid] || { state: 'offline' };
+                    return (
+                        <li key={chat.uid} className={`room-item joined ${activeRoomId === chatId ? 'active' : ''}`} onClick={() => setActiveRoomId(chatId)}>
+                            <div className="room-name-wrapper">
+                                <span 
+                                    className="status-indicator room-icon" 
+                                    style={{ 
+                                        backgroundColor: partnerStatus.state === 'online' ? '#28a745' : '#6c757d',
+                                    }}
+                                    title={partnerStatus.state === 'online' ? 'Online' : 'Offline'}
+                                ></span>
+                                <span className="room-name">{chat.displayName}</span>
+                            </div>
+                        </li>
+                    );
+                })}
+            </ul>
+        </div>
+        <StatusSelector user={user} currentStatus={myStatus} onStatusChange={() => {}} />
+      </div>
+      <div className="main-content">
+        {activeRoomId ? (
+          <>
+            <div className="chat-header">
+                <h2>{activeRoomId}</h2>
+                <button className="video-call-button" onClick={() => handleStartVideoCall(onlineUsers.find(u => u.uid !== user.uid))}>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16"><path d="M0 5a2 2 0 0 1 2-2h7.5a2 2 0 0 1 1.983 1.738L14.396 5.2a.5.5 0 0 1 .604.604l-1.464 2.928a.5.5 0 0 1-.604-.604l1.103-2.206a1 1 0 0 0-.992-.862H2a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1h1.5a.5.5 0 0 1 0 1H2a2 2 0 0 1-2-2V5zm11.5 5.175V14a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1v-3.825a.5.5 0 0 1 .943-.24l.435.87a.5.5 0 0 1-.443.745H2.5a.5.5 0 0 1 0-1H4a.5.5 0 0 1 .443.255l.435.87a.5.5 0 0 1-.443.745H4.5a.5.5 0 0 1 0-1H6a.5.5 0 0 1 .443.255l.435.87a.5.5 0 0 1-.443.745H6.5a.5.5 0 0 1 0-1H8a.5.5 0 0 1 .443.255l.435.87a.5.5 0 0 1-.443.745H8.5a.5.5 0 0 1 0-1h1.443a.5.5 0 0 1 .443.745l.435-.87a.5.5 0 0 1 .943.24z"/></svg>
+                </button>
+            </div>
+            <ul className="message-list" ref={messageListRef}>
+              {messages.map(message => (
+                <li key={message.id} 
+                    className={`message-wrapper ${message.uid === user.uid ? 'mine' : 'theirs'}`}
+                    onMouseEnter={() => setHoveredMessageId(message.id)}
+                    onMouseLeave={() => setHoveredMessageId(null)}
+                >
+                    {message.uid !== user.uid && <span className="message-sender" onClick={() => handleViewProfile(message.uid)}>{message.sender}</span>}
+                    <div className="message-content-wrapper">
+                        <div className="message">
+                            {message.imageUrl && (
+                                <img src={message.imageUrl} alt="Uploaded content" className="message-image" onClick={() => setViewingImage(message.imageUrl)} />
+                            )}
+                            {message.text && <p className="message-text">{message.text}</p>}
+                            <span className="message-timestamp">{new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                             {message.reactions && <ReactionsDisplay reactions={message.reactions} currentUserUid={user.uid} onSelect={(emoji) => handleReaction(message.id, emoji)} />}
+                        </div>
+                         {hoveredMessageId === message.id && <ReactionPicker onSelect={(emoji) => handleReaction(message.id, emoji)} />}
+                    </div>
+                </li>
+              ))}
+            </ul>
+            <div className="typing-indicator">{typingUsers.length > 0 && `${typingUsers.join(', ')} is typing...`}</div>
+            <form className="message-form" onSubmit={handleSendMessage}>
+              <input type="file" ref={fileInputRef} onChange={handleFileSelect} style={{ display: 'none' }} accept="image/*" />
+               <button type="button" className="attach-button" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" viewBox="0 0 16 16"><path d="M4.5 3a2.5 2.5 0 0 1 5 0v9a1.5 1.5 0 0 1-3 0V5a.5.5 0 0 1 1 0v7a.5.5 0 0 0 1 0V3a1.5 1.5 0 1 0-3 0v9a2.5 2.5 0 0 0 5 0V5a.5.5 0 0 1 1 0v7a3.5 3.5 0 1 1-7 0V3z"/></svg>
+                </button>
+              <input type="text" value={currentMessage} onChange={handleInputChange} className="message-input" placeholder="Digite uma mensagem..." />
+              <button type="submit" className="send-button" disabled={(!currentMessage.trim() && !imageToSend) || isUploading}>{isUploading ? 'Enviando...' : 'Enviar'}</button>
+            </form>
+          </>
+        ) : (
           <div className="welcome-screen">
             <h2>Bem-vindo ao Chat!</h2>
-            <p>Selecione uma sala ou uma pessoa para começar a conversar.</p>
+            <p>Selecione uma sala para começar a conversar.</p>
           </div>
-        ) : (
-          <>
-            <header className="chat-header">
-                <div className="chat-header-info">
-                    {isPrivateChat && chatPartner ? (
-                        <>
-                            <h2>{chatPartner.displayName}</h2>
-                            <p className="online-users-count">
-                                {partnerStatuses[chatPartner.uid]?.state === 'online' ? 'Online' : 'Offline'}
-                            </p>
-                        </>
-                    ) : activeRoom ? (
-                        <>
-                            <h2>{activeRoom.name}</h2>
-                        </>
-                    ) : null}
-                </div>
-                {isPrivateChat && callState !== 'idle' && (
-                    <div className={`call-status-indicator ${callState}`}>
-                        {callState === 'calling' && (
-                            <>
-                                <svg className="call-status-icon pulsing-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M3.654 1.328a.678.678 0 0 0-1.015-.063L1.605 2.3c-.483.484-.661 1.169-.45 1.77a17.568 17.568 0 0 0 4.168 6.608 17.569 17.569 0 0 0 6.608 4.168c.601.211 1.286.033 1.77-.45l1.034-1.034a.678.678 0 0 0-.063-1.015l-2.307-1.794a.678.678 0 0 0-.58-.122l-2.19.547a1.745 1.745 0 0 1-1.657-.459L5.482 8.062a1.745 1.745 0 0 1-.46-1.657l.548-2.19a.678.678 0 0 0-.122-.58L3.654 1.328zM1.884.511a1.745 1.745 0 0 1 2.612.163L6.29 2.98c.329.423.445.974.28 1.494l-.547 2.19a.678.678 0 0 0 .178.643l2.457 2.457a.678.678 0 0 0 .644.178l2.189-.547a1.745 1.745 0 0 1 1.494.28l2.306 1.794c.829.645.905 1.87.163 2.611l-1.034 1.034c-.74.74-1.846 1.065-2.877.702a18.634 18.634 0 0 1-7.01-4.42 18.634 18.634 0 0 1-4.42-7.009c-.362-1.03-.037-2.137.703-2.877L1.885.511z"/></svg>
-                                <span>Chamando...</span>
-                            </>
-                        )}
-                        {callState === 'ringing' && (
-                            <>
-                                <svg className="call-status-icon ringing-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M3.654 1.328a.678.678 0 0 0-1.015-.063L1.605 2.3c-.483.484-.661 1.169-.45 1.77a17.568 17.568 0 0 0 4.168 6.608 17.569 17.569 0 0 0 6.608 4.168c.601.211 1.286.033 1.77-.45l1.034-1.034a.678.678 0 0 0-.063-1.015l-2.307-1.794a.678.678 0 0 0-.58-.122l-2.19.547a1.745 1.745 0 0 1-1.657-.459L5.482 8.062a1.745 1.745 0 0 1-.46-1.657l.548-2.19a.678.678 0 0 0-.122-.58L3.654 1.328zM1.884.511a1.745 1.745 0 0 1 2.612.163L6.29 2.98c.329.423.445.974.28 1.494l-.547 2.19a.678.678 0 0 0 .178.643l2.457 2.457a.678.678 0 0 0 .644.178l2.189-.547a1.745 1.745 0 0 1 1.494.28l2.306 1.794c.829.645.905 1.87.163 2.611l-1.034 1.034c-.74.74-1.846 1.065-2.877.702a18.634 18.634 0 0 1-7.01-4.42 18.634 18.634 0 0 1-4.42-7.009c-.362-1.03-.037-2.137.703-2.877L1.885.511z"/></svg>
-                                <span>Chamada recebida...</span>
-                            </>
-                        )}
-                        {callState === 'connected' && (
-                            <>
-                                <svg className="call-status-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M0 5a2 2 0 0 1 2-2h7.5a2 2 0 0 1 1.983 1.738L14.33 5H14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-.33l1.823 2.43a.5.5 0 0 1-.364.801L15 12V9.5l.33-.44a1 1 0 0 1 1-1V5a1 1 0 0 1-1-1h-.5a2 2 0 0 1-2-2H2a2 2 0 0 1-2 2v6a2 2 0 0 1 2 2h7.5a2 2 0 0 1 1.983-1.738L13.67 11H14a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h.33l-1.823-2.43a.5.5 0 0 1 .364-.801L11 5V2.5l-.33.44a1 1 0 0 1-1 .56V5H2a1 1 0 0 1-1-1V5z"/></svg>
-                                <span>Em chamada de vídeo - {formatDuration(callDuration)}</span>
-                            </>
-                        )}
-                    </div>
-                )}
-                <div className="chat-header-actions">
-                    {isPrivateChat && callState === 'idle' && (
-                        <button onClick={handleStartCall} className="video-call-button" title="Iniciar chamada de vídeo">
-                           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M0 5a2 2 0 0 1 2-2h7.5a2 2 0 0 1 1.983 1.738L14.33 5H14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-.33l1.823 2.43a.5.5 0 0 1-.364.801L15 12V9.5l.33-.44a1 1 0 0 1 1-1V5a1 1 0 0 1-1-1h-.5a2 2 0 0 1-2-2H2a2 2 0 0 1-2 2v6a2 2 0 0 1 2 2h7.5a2 2 0 0 1 1.983-1.738L13.67 11H14a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h.33l-1.823-2.43a.5.5 0 0 1 .364-.801L11 5V2.5l-.33.44a1 1 0 0 1-1 .56V5H2a1 1 0 0 1-1-1V5zm11.5 2.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1z"/></svg>
-                        </button>
-                    )}
-                     {isPrivateChat && callState === 'calling' && (
-                        <button onClick={() => handleEndCall(true)} className="call-action-button decline" title="Cancelar chamada">
-                            Cancelar
-                        </button>
-                    )}
-                    {isPrivateChat && callState === 'ringing' && (
-                        <>
-                            <button onClick={handleDeclineCall} className="call-action-button decline" title="Recusar chamada">
-                                Recusar
-                            </button>
-                            <button onClick={handleAnswerCall} className="call-action-button accept" title="Aceitar chamada">
-                                Aceitar
-                            </button>
-                        </>
-                    )}
-                    {isPrivateChat && callState === 'connected' && (
-                        <button onClick={() => handleEndCall(true)} className="call-action-button decline" title="Encerrar chamada">
-                            Encerrar
-                        </button>
-                    )}
-                    {activeRoom?.type === 'private' && (
-                       <button onClick={() => setInviteCodeModalOpen(true)} className="invite-button" title="Gerar código de convite">
-                            Convidar
-                       </button>
-                    )}
-                </div>
-            </header>
-            
-            {callState === 'connected' ? (
-                <CallView 
-                    onEndCall={handleEndCall}
-                    localStream={localDisplayStream}
-                    remoteStream={remoteStream}
-                    isMuted={isMuted}
-                    isCameraOff={isCameraOff}
-                    toggleMute={toggleMute}
-                    toggleCamera={toggleCamera}
-                    isScreenSharing={isScreenSharing}
-                    toggleScreenShare={toggleScreenShare}
-                />
-            ) : (
-                <>
-                    <ul className="message-list" ref={messageListRef}>
-                        {messages.map(msg => {
-                            const isMine = msg.senderId === user.uid;
-                            return (
-                                <li key={msg.id} className={`message-wrapper ${isMine ? 'mine' : 'theirs'}`}>
-                                    {!isMine && !msg.deleted && (
-                                        <div className="message-sender" onClick={() => handleViewProfile(msg.senderId)}>
-                                            {msg.senderName}
-                                        </div>
-                                    )}
-                                    <div className="message-content-wrapper">
-                                        <div className={`message ${msg.deleted ? 'deleted' : ''}`}>
-                                            {msg.imageUrl && !msg.deleted && (
-                                                <img src={msg.imageUrl} alt="Anexo" className="message-image" onClick={() => setViewingImage(msg.imageUrl)} />
-                                            )}
-                                            {msg.text && (
-                                                <p className="message-text">{renderMessageWithMentions(msg.text)}</p>
-                                            )}
-                                            {!msg.deleted && (
-                                                <div className="message-timestamp">
-                                                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                                </div>
-                                            )}
-                                        </div>
-                                        {isMine && !msg.deleted && (
-                                            <button className="delete-message-button" title="Excluir" onClick={() => handleDeleteMessage(msg.id)}>
-                                                &times;
-                                            </button>
-                                        )}
-                                    </div>
-                                </li>
-                            );
-                        })}
-                    </ul>
-                    <div className="typing-indicator">
-                    {formatTypingMessage(typingUsers)}
-                    </div>
-
-                    <form className="message-form" onSubmit={handleSendMessage}>
-                        {mentionSuggestions.length > 0 && (
-                            <div className="mention-suggestions">
-                                {mentionSuggestions.map(u => (
-                                    <div key={u.uid} className="mention-item" onClick={() => handleSelectMention(u.displayName)}>
-                                        {u.displayName}
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                        {imagePreviewUrl && (
-                            <div className="image-preview-container">
-                                <img src={imagePreviewUrl} alt="Prévia" className="image-preview" />
-                                <button type="button" onClick={removeImageToSend} className="remove-image-button">&times;</button>
-                            </div>
-                        )}
-                        <input type="file" ref={fileInputRef} onChange={handleFileChange} accept="image/*" style={{ display: 'none' }} />
-                        <button type="button" className="attach-button" onClick={handleImageSelectClick}>
-                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                        </button>
-                        <input
-                            type="text"
-                            value={currentMessage}
-                            onChange={handleTyping}
-                            placeholder="Digite uma mensagem..."
-                            className="message-input"
-                            disabled={isUploading}
-                        />
-                        <button type="submit" className="send-button" disabled={isUploading}>
-                            {isUploading ? 'Enviando...' : 'Enviar'}
-                        </button>
-                    </form>
-                </>
-            )}
-          </>
         )}
-      </main>
-      
-      {isGroupRoom && onlineUsers.length > 0 && (
-         <aside className="online-users-panel">
-            <h4>Online — {onlineUsers.length}</h4>
-            <ul className="online-users-list">
-               {onlineUsers.map(u => (
-                  <li key={u.uid} className="online-user-item" onClick={() => handleViewProfile(u.uid)}>
-                     <div className="online-user-info">
-                        <span className="status-indicator" style={{ backgroundColor: userStatuses[u.status]?.color || userStatuses.offline.color }}></span>
-                        <span>{u.displayName}</span>
-                     </div>
-                     <span className="online-user-status-text">{userStatuses[u.status]?.text || 'Offline'}</span>
-                  </li>
-               ))}
-            </ul>
-         </aside>
-      )}
-
+      </div>
     </div>
   );
 };
 
+
 const App = () => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [consentGiven, setConsentGiven] = useState(localStorage.getItem('privacyConsent') === 'true');
-  const [isFirebaseConfigured, setIsFirebaseConfigured] = useState(false);
+  const [isConfigured, setIsConfigured] = useState(false);
+  const [consentGiven, setConsentGiven] = useState(() => localStorage.getItem('chat_consent') === 'true');
 
   useEffect(() => {
-    // Check if Firebase config has been replaced from placeholders
-    const isConfigured = firebaseConfig.apiKey !== "YOUR_API_key" && 
-                         firebaseConfig.projectId !== "YOUR_PROJECT_ID";
-    setIsFirebaseConfigured(isConfigured);
+     // Check if the config is just placeholders
+    const isPlaceholder = (
+      firebaseConfig.apiKey === "YOUR_API_key" ||
+      firebaseConfig.authDomain === "YOUR_PROJECT_ID.firebaseapp.com" ||
+      firebaseConfig.databaseURL === "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com" ||
+      firebaseConfig.projectId === "YOUR_PROJECT_ID"
+    );
+    setIsConfigured(!isPlaceholder);
 
-    if (isConfigured) {
-      const unsubscribe = auth.onAuthStateChanged(user => {
-        setUser(user);
+    const unsubscribe = auth.onAuthStateChanged(user => {
+        if (user) {
+            const userRef = database.ref(`users/${user.uid}`);
+            userRef.once('value', snapshot => {
+                const userData = snapshot.val();
+                if (userData) {
+                    setUser({ uid: user.uid, ...userData });
+                } else {
+                    // This case handles Google sign-in for users who don't have a DB entry yet
+                    const newUser = {
+                        uid: user.uid,
+                        displayName: user.displayName,
+                        email: user.email,
+                        status: 'available',
+                        publicRooms: { 'general': true }
+                    };
+                    userRef.set(newUser);
+                    setUser(newUser);
+                }
+            });
+        } else {
+            setUser(null);
+        }
         setLoading(false);
-      });
-      return () => unsubscribe();
-    } else {
-      setLoading(false);
-    }
-  }, []);
-
-  const handleConsent = () => {
-    localStorage.setItem('privacyConsent', 'true');
-    setConsentGiven(true);
-  };
-  
-  // Set up presence management
-  useEffect(() => {
-    if (!user) return;
-    const myUid = user.uid;
-    const userStatusRef = database.ref(`/status/${myUid}`);
-    const userStatusDBRef = database.ref(`/users/${myUid}/status`);
-
-    const isOfflineForDatabase = {
-      state: 'offline',
-      status: 'offline',
-      last_changed: firebase.database.ServerValue.TIMESTAMP,
-    };
-    const isOnlineForDatabase = {
-      state: 'online',
-      status: 'available', // Default to available on login
-      last_changed: firebase.database.ServerValue.TIMESTAMP,
-    };
-    
-    database.ref('.info/connected').on('value', (snapshot) => {
-      if (snapshot.val() === false) {
-        return;
-      }
-      userStatusRef.onDisconnect().set(isOfflineForDatabase).then(() => {
-        userStatusRef.set(isOnlineForDatabase);
-        // Also update the status text in the user profile
-        userStatusDBRef.once('value', (snap) => {
-            const currentStatus = snap.val() || 'available';
-            isOnlineForDatabase.status = currentStatus;
-            userStatusRef.set(isOnlineForDatabase);
-        });
-      });
     });
 
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const myStatusRef = database.ref(`status/${user.uid}`);
+    myStatusRef.set({ state: 'online', status: 'available' });
+
+    const onOffline = { state: 'offline', last_changed: firebase.database.ServerValue.TIMESTAMP };
+    myStatusRef.onDisconnect().set(onOffline);
+
+    const connectedRef = database.ref('.info/connected');
+    const listener = connectedRef.on('value', (snap) => {
+        if (snap.val() === true) {
+            myStatusRef.set({ state: 'online', status: 'available' });
+        }
+    });
+
+    return () => {
+        myStatusRef.set(onOffline);
+        connectedRef.off('value', listener);
+    };
   }, [user]);
 
-  if (!isFirebaseConfigured) {
+  const handleConsent = () => {
+    localStorage.setItem('chat_consent', 'true');
+    setConsentGiven(true);
+  };
+
+  if (!isConfigured) {
     return <ConfigWarning />;
   }
-
+  
   if (loading) {
     return <div className="loading-screen">Carregando...</div>;
   }
   
+  if (!user) {
+      return <AuthScreen />;
+  }
+  
   if (!consentGiven) {
-      return <PrivacyConsentModal onAccept={handleConsent} />;
+    return <PrivacyConsentModal onAccept={handleConsent} />;
   }
 
-  return user ? <Chat user={user} /> : <AuthScreen />;
+  return <Chat user={user} />;
 };
 
 const container = document.getElementById('root');
-const root = createRoot(container!);
+const root = createRoot(container);
 root.render(<App />);
